@@ -4,6 +4,7 @@ import numpy as np
 import pickle
 from PIL import Image
 import mediapipe as mp
+import os
 
 # Set page config for mobile-friendly layout
 st.set_page_config(
@@ -37,17 +38,25 @@ st.markdown("""
 # Load the model
 @st.cache_resource
 def load_model():
-    model_dict = pickle.load(open('./model.p', 'rb'))
-    return model_dict['model']
+    try:
+        model_dict = pickle.load(open('./model.p', 'rb'))
+        return model_dict['model']
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        return None
 
 # Initialize MediaPipe Hands
 @st.cache_resource
 def init_mediapipe():
-    mp_hands = mp.solutions.hands
-    mp_drawing = mp.solutions.drawing_utils
-    mp_drawing_styles = mp.solutions.drawing_styles
-    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.5)
-    return mp_hands, mp_drawing, mp_drawing_styles, hands
+    try:
+        mp_hands = mp.solutions.hands
+        mp_drawing = mp.solutions.drawing_utils
+        mp_drawing_styles = mp.solutions.drawing_styles
+        hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.5)
+        return mp_hands, mp_drawing, mp_drawing_styles, hands
+    except Exception as e:
+        st.error(f"Error initializing MediaPipe: {str(e)}")
+        return None, None, None, None
 
 # Labels dictionary
 labels_dict = {
@@ -59,36 +68,40 @@ labels_dict = {
 }
 
 def process_frame(frame, hands, mp_hands, mp_drawing, mp_drawing_styles):
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = hands.process(frame_rgb)
-    
-    data_aux = []
-    x_ = []
-    y_ = []
-    
-    if results.multi_hand_landmarks:
-        for hand_landmarks in results.multi_hand_landmarks:
-            mp_drawing.draw_landmarks(
-                frame,
-                hand_landmarks,
-                mp_hands.HAND_CONNECTIONS,
-                mp_drawing_styles.get_default_hand_landmarks_style(),
-                mp_drawing_styles.get_default_hand_connections_style()
-            )
-            
-            for i in range(len(hand_landmarks.landmark)):
-                x = hand_landmarks.landmark[i].x
-                y = hand_landmarks.landmark[i].y
-                x_.append(x)
-                y_.append(y)
-            
-            for i in range(len(hand_landmarks.landmark)):
-                x = hand_landmarks.landmark[i].x
-                y = hand_landmarks.landmark[i].y
-                data_aux.append(x - min(x_))
-                data_aux.append(y - min(y_))
-    
-    return frame, data_aux, x_, y_
+    try:
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(frame_rgb)
+        
+        data_aux = []
+        x_ = []
+        y_ = []
+        
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_drawing.draw_landmarks(
+                    frame,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS,
+                    mp_drawing_styles.get_default_hand_landmarks_style(),
+                    mp_drawing_styles.get_default_hand_connections_style()
+                )
+                
+                for i in range(len(hand_landmarks.landmark)):
+                    x = hand_landmarks.landmark[i].x
+                    y = hand_landmarks.landmark[i].y
+                    x_.append(x)
+                    y_.append(y)
+                
+                for i in range(len(hand_landmarks.landmark)):
+                    x = hand_landmarks.landmark[i].x
+                    y = hand_landmarks.landmark[i].y
+                    data_aux.append(x - min(x_))
+                    data_aux.append(y - min(y_))
+        
+        return frame, data_aux, x_, y_
+    except Exception as e:
+        st.error(f"Error processing frame: {str(e)}")
+        return frame, [], [], []
 
 def main():
     st.title("✋ Sign Language Recognition")
@@ -99,69 +112,63 @@ def main():
     
     # Initialize model and MediaPipe
     model = load_model()
+    if model is None:
+        st.error("Failed to load the model. Please check if model.p exists in the current directory.")
+        return
+        
     mp_hands, mp_drawing, mp_drawing_styles, hands = init_mediapipe()
+    if hands is None:
+        st.error("Failed to initialize MediaPipe. Please check your installation.")
+        return
     
     # Create a placeholder for the video feed
     video_placeholder = st.empty()
     prediction_placeholder = st.empty()
     
-    # Initialize webcam
-    cap = cv2.VideoCapture(0)
+    # Camera input
+    camera_input = st.camera_input("Take a picture of your hand sign")
     
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                st.error("Failed to access camera. Please check your camera connection.")
-                break
+    if camera_input is not None:
+        # Convert the uploaded image to OpenCV format
+        bytes_data = camera_input.getvalue()
+        nparr = np.frombuffer(bytes_data, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        # Process the frame
+        processed_frame, data_aux, x_, y_ = process_frame(frame, hands, mp_hands, mp_drawing, mp_drawing_styles)
+        
+        if data_aux:  # If hand landmarks were detected
+            try:
+                prediction = model.predict([np.asarray(data_aux)])
+                predicted_character = labels_dict[int(prediction[0])]
                 
-            # Process the frame
-            processed_frame, data_aux, x_, y_ = process_frame(frame, hands, mp_hands, mp_drawing, mp_drawing_styles)
-            
-            if data_aux:  # If hand landmarks were detected
-                try:
-                    prediction = model.predict([np.asarray(data_aux)])
-                    predicted_character = labels_dict[int(prediction[0])]
-                    
-                    # Draw prediction on frame
-                    H, W, _ = frame.shape
-                    x1 = int(min(x_) * W) - 10
-                    y1 = int(min(y_) * H) - 10
-                    x2 = int(max(x_) * W) - 10
-                    y2 = int(max(y_) * H) - 10
-                    
-                    cv2.rectangle(processed_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(processed_frame, predicted_character, (x1, y1 - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 255, 0), 3, cv2.LINE_AA)
-                    
-                    # Update prediction text
-                    prediction_placeholder.success(f"Detected Sign: {predicted_character}")
-                    
-                except Exception as e:
-                    prediction_placeholder.warning("Processing hand sign...")
-            else:
-                prediction_placeholder.info("No hand detected. Please show your hand to the camera.")
-            
-            # Display the frame
-            video_placeholder.image(processed_frame, channels="BGR", use_column_width=True)
-            
-            # Add a small delay to prevent high CPU usage
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+                # Draw prediction on frame
+                H, W, _ = frame.shape
+                x1 = int(min(x_) * W) - 10
+                y1 = int(min(y_) * H) - 10
+                x2 = int(max(x_) * W) - 10
+                y2 = int(max(y_) * H) - 10
                 
-    except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
-    finally:
-        cap.release()
-        cv2.destroyAllWindows()
+                cv2.rectangle(processed_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(processed_frame, predicted_character, (x1, y1 - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 255, 0), 3, cv2.LINE_AA)
+                
+                # Display results
+                st.image(processed_frame, channels="BGR", use_column_width=True)
+                st.success(f"Detected Sign: {predicted_character}")
+                
+            except Exception as e:
+                st.error(f"Error during prediction: {str(e)}")
+        else:
+            st.warning("No hand detected in the image. Please make sure your hand is clearly visible.")
     
     # Add some helpful information
     with st.expander("How to use"):
         st.markdown("""
-            1. Allow camera access when prompted
+            1. Click the camera button to take a picture
             2. Make sure your hand is clearly visible in the frame
             3. Hold your hand sign steady
-            4. The app will detect and display the recognized sign in real-time
+            4. The app will detect and display the recognized sign
         """)
     
     with st.expander("Supported Signs"):
